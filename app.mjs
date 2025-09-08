@@ -3,9 +3,12 @@ import express from "express";
 import bodyParser from "body-parser";
 import fetch from "node-fetch"; // si Node 18+ et sans node-fetch, utiliser global fetch
 import dotenv from "dotenv";
+import cors from "cors";
+
 dotenv.config();
 
 const app = express();
+app.use(cors());
 app.use(bodyParser.json());
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
