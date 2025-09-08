@@ -32,13 +32,15 @@ app.post("/api/culture", async (req, res) => {
     const systemPrompt = `
 You are a helpful agricultural assistant. When asked about a crop, provide a concise factual JSON only (no surrounding text).
 Return fields exactly as in the schema described and valid JSON. If uncertain, provide best guess and set "confidence" to "low" or "medium".
+
+If you cannot find relevant data, return empty strings for dates and color_hex, and "low" confidence with explanation. Do not invent data.
+
 Schema (JSON keys):
 {
   "culture": "<original input>",
   "region": "<region or empty string>",
-  "average_sowing_date": "MM-DD",             // a typical average day-month within a year
-  "implantation_duration_days": 0,            // integer number of days to consider 'establishment' (nullable)
-  "end_of_season": "MM-DD",                   // optional alternative to duration; can be empty string
+  "average_sowing_date": "MM-DD",             // The typical time in the year when this kind of crop is being sowed
+  "end_of_season": "MM-DD",                   // The typical time in the year when this kind of crop is harvested
   "color_hex": "#RRGGBB",                     // hex color representing crop
   "confidence": "low|medium|high",
   "source_explanation": "short plain text justification (<= 30 words)"
@@ -48,7 +50,6 @@ Important:
 - RETURN ONLY JSON, no markdown, no backticks, no commentary.
 - Dates MUST be in zero-padded two-digit month/day format MM-DD (e.g. 03-15 for 15 March).
 - If only month-level known, pick the 15th of that month as the average (e.g. May => 05-15).
-- Choose implantation_duration_days as an integer if known; otherwise null.
 - color_hex must be a valid web hex (# followed by 6 hex digits). Prefer colors that intuitively match the crop.
 - Keep source_explanation short (<= 30 words) and factual (e.g. "Typical temperate sowing window; crop matures ~90 days").
 
@@ -119,15 +120,13 @@ Answer strictly in JSON following the schema.
       culture: parsed.culture || culture,
       region: parsed.region || (region || ""),
       average_sowing_date: parsed.average_sowing_date || "",
-      implantation_duration_days:
-        parsed.implantation_duration_days === undefined ? null : parsed.implantation_duration_days,
       end_of_season: parsed.end_of_season || "",
       color_hex: parsed.color_hex || "",
       confidence: parsed.confidence || "low",
       source_explanation: parsed.source_explanation || ""
     };
 
-    return res.json({ from_model: out, raw_model_text: raw });
+    return res.json(out);
   } catch (err) {
     console.error(err);
     return res.status(500).json({ error: "server_error", detail: err.message });
