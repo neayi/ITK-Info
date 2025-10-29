@@ -1,7 +1,7 @@
 // app.js
 import express from "express";
 import bodyParser from "body-parser";
-import fetch from "node-fetch"; // si Node 18+ et sans node-fetch, utiliser global fetch
+import fetch from "node-fetch";
 import dotenv from "dotenv";
 import cors from "cors";
 
@@ -18,7 +18,7 @@ if (!OPENAI_API_KEY) {
 }
 
 // Config modèle choisi
-const MODEL = "gpt-4o-mini"; // recommandé pour bon ratio coût/qualité pour tâches textuelles. :contentReference[oaicite:1]{index=1}
+const MODEL = "gpt-4o-mini";
 
 /**
  * POST /api/culture
@@ -136,7 +136,161 @@ Answer strictly in JSON following the schema.
   }
 });
 
-const PORT = process.env.PORT || 3000;
+/**
+ * POST /api/location
+ * body: { address: "string" }
+ * Returns: { address, latitude, longitude, monthly_temperatures: [], monthly_rainfall: [], confidence, source_explanation }
+ */
+app.post("/api/location", async (req, res) => {
+  try {
+    const { address } = req.body || {};
+    if (!address || typeof address !== "string" || address.trim().length === 0) {
+      return res.status(400).json({ error: "Missing or invalid 'address' in body." });
+    }
+
+    // Step 1: Geocode using French Government Address API
+    const geocodeUrl = `https://api-adresse.data.gouv.fr/search/?q=${encodeURIComponent(address.trim())}`;
+    
+    console.log("Geocoding URL:", geocodeUrl);
+
+    const geoResp = await fetch(geocodeUrl, {
+      method: "GET",
+      headers: {
+        "Accept": "application/json"
+      }
+    });
+
+    console.log("Geocoding response status:", geoResp.status);
+
+    if (!geoResp.ok) {
+      return res.status(502).json({ error: "Geocoding API error", detail: await geoResp.text() });
+    }
+
+    const geoData = await geoResp.json();
+    
+    let latitude = null;
+    let longitude = null;
+    let postalCode = null;
+    
+    if (geoData?.features && geoData.features.length > 0) {
+      const coords = geoData.features[0]?.geometry?.coordinates;
+      if (coords && coords.length === 2) {
+        longitude = coords[0];
+        latitude = coords[1];
+        postalCode = geoData.features[0]?.properties?.postcode || null;
+      }
+    }
+
+    // If geocoding failed, fallback to ChatGPT for approximate coordinates
+    if (!latitude || !longitude) {
+      console.log("Geocoding failed, using ChatGPT fallback");
+    }
+
+    // Step 2: Get climate data from ChatGPT
+    const systemPrompt = `
+You are a climate data assistant. When given an address or location, provide monthly temperature and rainfall data.
+Return fields exactly as in the schema and valid JSON only (no surrounding text).
+
+Schema (JSON keys):
+{
+  "address": "<original input>",
+  "latitude": <number or null>,
+  "longitude": <number or null>,
+  "postalCode": <string or null>,
+  "monthly_temperatures": [<12 numbers in Celsius, Jan-Dec>],
+  "monthly_rainfall": [<12 numbers in mm, Jan-Dec>],
+  "confidence": "low|medium|high",
+  "source_explanation": "short explanation (<= 50 words)"
+}
+
+Important:
+- RETURN ONLY JSON, no markdown, no backticks, no commentary.
+- monthly_temperatures and monthly_rainfall MUST be arrays of exactly 12 numbers.
+- If postal code is provided, use it; otherwise estimate based on the address.
+- Provide typical/average climate data for the location.
+`;
+
+    const userPrompt = `Postal code: ${postalCode}; Address: "${address.trim()}"${latitude && longitude ? `; Latitude: ${latitude}, Longitude: ${longitude}` : ""}. Provide monthly climate data as JSON.`;
+    console.log("User prompt:", userPrompt);
+
+    const messages = [
+      { role: "system", content: systemPrompt },
+      { role: "user", content: userPrompt }
+    ];
+
+    const climateResp = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${OPENAI_API_KEY}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        model: MODEL,
+        messages,
+        max_tokens: 600,
+        temperature: 0.0
+      })
+    });
+
+    if (!climateResp.ok) {
+      const text = await climateResp.text();
+      return res.status(502).json({ error: "OpenAI API error", detail: text });
+    }
+
+    const climateData = await climateResp.json();
+    const raw = climateData?.choices?.[0]?.message?.content;
+    
+    if (!raw) {
+      return res.status(502).json({ error: "Empty response from OpenAI", raw: climateData });
+    }
+
+    // Parse JSON response
+    let parsed = null;
+    try {
+      parsed = JSON.parse(raw);
+    } catch (e) {
+      const jsonMatch = raw.match(/({[\s\S]*})/);
+      if (jsonMatch) {
+        try {
+          parsed = JSON.parse(jsonMatch[1]);
+        } catch (e2) {
+          // fallthrough
+        }
+      }
+    }
+
+    if (!parsed) {
+      return res.status(200).json({
+        warning: "Could not parse model output as JSON. Returning raw output.",
+        raw
+      });
+    }
+
+    // Override with actual geocoded coordinates if available
+    if (latitude && longitude) {
+      parsed.latitude = latitude;
+      parsed.longitude = longitude;
+    }
+
+    const out = {
+      address: parsed.address || address,
+      latitude: parsed.latitude || null,
+      longitude: parsed.longitude || null,
+      postalCode: parsed.postalCode || null,
+      monthly_temperatures: parsed.monthly_temperatures || [],
+      monthly_rainfall: parsed.monthly_rainfall || [],
+      confidence: parsed.confidence || "low",
+      source_explanation: parsed.source_explanation || ""
+    };
+
+    return res.json(out);
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ error: "server_error", detail: err.message });
+  }
+});
+
+const PORT = process.env.PORT || 80;
 app.listen(PORT, () => {
-  console.log(`Culture-date-api listening on ${PORT}`);
+  console.log(`Culture-date-api listening on port ${PORT}`);
 });
