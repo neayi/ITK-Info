@@ -171,13 +171,28 @@ app.post("/api/location", async (req, res) => {
     let latitude = null;
     let longitude = null;
     let postalCode = null;
-    
+    let city = null;
+    let department = null;
+    let region = null;
+    let country = null;
+
     if (geoData?.features && geoData.features.length > 0) {
+      const props = geoData.features[0]?.properties || {};
       const coords = geoData.features[0]?.geometry?.coordinates;
       if (coords && coords.length === 2) {
         longitude = coords[0];
         latitude = coords[1];
-        postalCode = geoData.features[0]?.properties?.postcode || null;
+      }
+      postalCode = props.postcode || null;
+      city = props.city || null;
+      // context is formatted as "depcode, department name, region name"
+      if (props.context) {
+        const [, contextDepartment, contextRegion] = props.context.split(",").map((s) => s.trim());
+        department = contextDepartment || null;
+        region = contextRegion || null;
+      }
+      if (city) {
+        country = "France"; // this geocoding API only covers French addresses
       }
     }
 
@@ -197,6 +212,10 @@ Schema (JSON keys):
   "latitude": <number or null>,
   "longitude": <number or null>,
   "postalCode": <string or null>,
+  "city": "<city/town name or empty string>",
+  "department": "<department name or empty string>",
+  "region": "<region name or empty string>",
+  "country": "<country name or empty string>",
   "monthly_temperatures": [<12 numbers in Celsius, Jan-Dec>],
   "monthly_rainfall": [<12 numbers in mm, Jan-Dec>],
   "confidence": "low|medium|high",
@@ -207,10 +226,11 @@ Important:
 - RETURN ONLY JSON, no markdown, no backticks, no commentary.
 - monthly_temperatures and monthly_rainfall MUST be arrays of exactly 12 numbers.
 - If postal code is provided, use it; otherwise estimate based on the address.
+- If city, department, region or country are provided below, reuse them as-is instead of guessing.
 - Provide typical/average climate data for the location.
 `;
 
-    const userPrompt = `Postal code: ${postalCode}; Address: "${address.trim()}"${latitude && longitude ? `; Latitude: ${latitude}, Longitude: ${longitude}` : ""}. Provide monthly climate data as JSON.`;
+    const userPrompt = `Postal code: ${postalCode}; City: ${city || "unknown"}; Department: ${department || "unknown"}; Region: ${region || "unknown"}; Country: ${country || "unknown"}; Address: "${address.trim()}"${latitude && longitude ? `; Latitude: ${latitude}, Longitude: ${longitude}` : ""}. Provide monthly climate data as JSON.`;
     console.log("User prompt:", userPrompt);
 
     const messages = [
@@ -266,17 +286,25 @@ Important:
       });
     }
 
-    // Override with actual geocoded coordinates if available
+    // Override with actual geocoded data if available
     if (latitude && longitude) {
       parsed.latitude = latitude;
       parsed.longitude = longitude;
     }
+    if (city) parsed.city = city;
+    if (department) parsed.department = department;
+    if (region) parsed.region = region;
+    if (country) parsed.country = country;
 
     const out = {
       address: parsed.address || address,
       latitude: parsed.latitude || null,
       longitude: parsed.longitude || null,
       postalCode: parsed.postalCode || null,
+      city: parsed.city || "",
+      department: parsed.department || "",
+      region: parsed.region || "",
+      country: parsed.country || "",
       monthly_temperatures: parsed.monthly_temperatures || [],
       monthly_rainfall: parsed.monthly_rainfall || [],
       confidence: parsed.confidence || "low",
