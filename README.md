@@ -99,6 +99,18 @@ docker-compose down
 
 ## Testing
 
+### Automated tests
+
+```bash
+npm test        # unit + validation tests (no network, no API key needed)
+npm run test:e2e  # full end-to-end test against a running instance on http://localhost
+```
+
+`npm run test:e2e` assumes the app is already up (e.g. `docker-compose up -d`) with its
+own `OPENAI_API_KEY` configured; the test itself doesn't need a key, it only calls the
+HTTP API. Override the target with `BASE_URL=http://localhost:3000 npm run test:e2e`.
+If no server responds, the e2e tests are skipped rather than failed.
+
 ### Test with cURL
 
 **Culture Information:**

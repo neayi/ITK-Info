@@ -4,7 +4,9 @@
   "description": "Simple API to get sowing date, harvest date and color for a crop via ChatGPT",
   "main": "app.mjs",
   "scripts": {
-    "start": "node app.mjs"
+    "start": "node app.mjs",
+    "test": "node --test test/*.test.mjs",
+    "test:e2e": "node --test test/e2e/*.test.mjs"
   },
   "dependencies": {
     "body-parser": "^2.2.0",

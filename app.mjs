@@ -4,6 +4,7 @@ import bodyParser from "body-parser";
 import fetch from "node-fetch";
 import dotenv from "dotenv";
 import cors from "cors";
+import { parseModelJson, parseGeocodeFeature } from "./lib/parse.mjs";
 
 dotenv.config();
 
@@ -19,6 +20,14 @@ if (!OPENAI_API_KEY) {
 
 // Config modèle choisi
 const MODEL = "gpt-4o-mini";
+
+/**
+ * GET /
+ * Health check
+ */
+app.get("/", (req, res) => {
+  res.status(200).json({ status: "ok" });
+});
 
 /**
  * POST /api/culture
@@ -94,21 +103,8 @@ Answer strictly in JSON following the schema.
       return res.status(502).json({ error: "Empty response from OpenAI", raw: data });
     }
 
-    // Try to parse the raw text as JSON. Models sometimes wrap JSON inside text; extract first JSON block if needed.
-    let parsed = null;
-    try {
-      parsed = JSON.parse(raw);
-    } catch (e) {
-      // extract JSON substring
-      const jsonMatch = raw.match(/({[\s\S]*})/);
-      if (jsonMatch) {
-        try {
-          parsed = JSON.parse(jsonMatch[1]);
-        } catch (e2) {
-          // fallthrough
-        }
-      }
-    }
+    // Models sometimes wrap JSON inside text; tolerate that when parsing.
+    const parsed = parseModelJson(raw);
 
     if (!parsed) {
       // fallback: return raw and indicate parse error
@@ -167,148 +163,56 @@ app.post("/api/location", async (req, res) => {
     }
 
     const geoData = await geoResp.json();
-    
-    let latitude = null;
-    let longitude = null;
-    let postalCode = null;
-    let city = null;
-    let department = null;
-    let region = null;
-    let country = null;
 
-    if (geoData?.features && geoData.features.length > 0) {
-      const props = geoData.features[0]?.properties || {};
-      const coords = geoData.features[0]?.geometry?.coordinates;
-      if (coords && coords.length === 2) {
-        longitude = coords[0];
-        latitude = coords[1];
-      }
-      postalCode = props.postcode || null;
-      city = props.city || null;
-      // context is formatted as "depcode, department name, region name"
-      if (props.context) {
-        const [, contextDepartment, contextRegion] = props.context.split(",").map((s) => s.trim());
-        department = contextDepartment || null;
-        region = contextRegion || null;
-      }
-      if (city) {
-        country = "France"; // this geocoding API only covers French addresses
-      }
-    }
+    const { latitude, longitude, postalCode, city, department, region, country } =
+      parseGeocodeFeature(geoData?.features?.[0]);
 
-    // If geocoding failed, fallback to ChatGPT for approximate coordinates
+    // Without coordinates we cannot query NASA POWER for climate data.
     if (!latitude || !longitude) {
-      console.log("Geocoding failed, using ChatGPT fallback");
+      return res.status(400).json({ error: "Could not geocode address; no coordinates found." });
     }
 
-    // Step 2: Get climate data from ChatGPT
-    const systemPrompt = `
-You are a climate data assistant. When given an address or location, provide monthly temperature and rainfall data.
-Return fields exactly as in the schema and valid JSON only (no surrounding text).
+    // Step 2: Get climate data from NASA POWER climatology API
+    const nasaUrl = new URL("https://power.larc.nasa.gov/api/temporal/climatology/point");
+    nasaUrl.searchParams.set("parameters", "T2M,PRECTOTCORR_SUM");
+    nasaUrl.searchParams.set("community", "AG");
+    nasaUrl.searchParams.set("longitude", longitude.toString());
+    nasaUrl.searchParams.set("latitude", latitude.toString());
+    nasaUrl.searchParams.set("format", "JSON");
+    nasaUrl.searchParams.set("units", "metric");
+    nasaUrl.searchParams.set("start", "2018");
+    nasaUrl.searchParams.set("end", "2024"); // La date de fin peut être obtenue dynamiquement via l'API : https://power.larc.nasa.gov/api/temporal/climatology/configuration
 
-Schema (JSON keys):
-{
-  "address": "<original input>",
-  "latitude": <number or null>,
-  "longitude": <number or null>,
-  "postalCode": <string or null>,
-  "city": "<city/town name or empty string>",
-  "department": "<department name or empty string>",
-  "region": "<region name or empty string>",
-  "country": "<country name or empty string>",
-  "monthly_temperatures": [<12 numbers in Celsius, Jan-Dec>],
-  "monthly_rainfall": [<12 numbers in mm, Jan-Dec>],
-  "confidence": "low|medium|high",
-  "source_explanation": "short explanation (<= 50 words)"
-}
+    const nasaResp = await fetch(nasaUrl.toString());
 
-Important:
-- RETURN ONLY JSON, no markdown, no backticks, no commentary.
-- monthly_temperatures and monthly_rainfall MUST be arrays of exactly 12 numbers.
-- If postal code is provided, use it; otherwise estimate based on the address.
-- If city, department, region or country are provided below, reuse them as-is instead of guessing.
-- Provide typical/average climate data for the location.
-`;
-
-    const userPrompt = `Postal code: ${postalCode}; City: ${city || "unknown"}; Department: ${department || "unknown"}; Region: ${region || "unknown"}; Country: ${country || "unknown"}; Address: "${address.trim()}"${latitude && longitude ? `; Latitude: ${latitude}, Longitude: ${longitude}` : ""}. Provide monthly climate data as JSON.`;
-    console.log("User prompt:", userPrompt);
-
-    const messages = [
-      { role: "system", content: systemPrompt },
-      { role: "user", content: userPrompt }
-    ];
-
-    const climateResp = await fetch("https://api.openai.com/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Authorization": `Bearer ${OPENAI_API_KEY}`,
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({
-        model: MODEL,
-        messages,
-        max_tokens: 600,
-        temperature: 0.0
-      })
-    });
-
-    if (!climateResp.ok) {
-      const text = await climateResp.text();
-      return res.status(502).json({ error: "OpenAI API error", detail: text });
+    if (!nasaResp.ok) {
+      const text = await nasaResp.text();
+      return res.status(502).json({ error: "NASA POWER API error", detail: text });
     }
 
-    const climateData = await climateResp.json();
-    const raw = climateData?.choices?.[0]?.message?.content;
-    
-    if (!raw) {
-      return res.status(502).json({ error: "Empty response from OpenAI", raw: climateData });
-    }
+    const nasaData = await nasaResp.json();
 
-    // Parse JSON response
-    let parsed = null;
-    try {
-      parsed = JSON.parse(raw);
-    } catch (e) {
-      const jsonMatch = raw.match(/({[\s\S]*})/);
-      if (jsonMatch) {
-        try {
-          parsed = JSON.parse(jsonMatch[1]);
-        } catch (e2) {
-          // fallthrough
-        }
-      }
-    }
+    const MONTHS = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"];
+    const t2m = nasaData?.properties?.parameter?.T2M;
+    const precip = nasaData?.properties?.parameter?.PRECTOTCORR_SUM;
 
-    if (!parsed) {
-      return res.status(200).json({
-        warning: "Could not parse model output as JSON. Returning raw output.",
-        raw
-      });
+    if (!t2m || !precip) {
+      return res.status(502).json({ error: "Unexpected NASA POWER API response", raw: nasaData });
     }
-
-    // Override with actual geocoded data if available
-    if (latitude && longitude) {
-      parsed.latitude = latitude;
-      parsed.longitude = longitude;
-    }
-    if (city) parsed.city = city;
-    if (department) parsed.department = department;
-    if (region) parsed.region = region;
-    if (country) parsed.country = country;
 
     const out = {
-      address: parsed.address || address,
-      latitude: parsed.latitude || null,
-      longitude: parsed.longitude || null,
-      postalCode: parsed.postalCode || null,
-      city: parsed.city || "",
-      department: parsed.department || "",
-      region: parsed.region || "",
-      country: parsed.country || "",
-      monthly_temperatures: parsed.monthly_temperatures || [],
-      monthly_rainfall: parsed.monthly_rainfall || [],
-      confidence: parsed.confidence || "low",
-      source_explanation: parsed.source_explanation || ""
+      address: address.trim(),
+      latitude,
+      longitude,
+      postalCode: postalCode || null,
+      city: city || "",
+      department: department || "",
+      region: region || "",
+      country: country || "",
+      monthly_temperatures: MONTHS.map((m) => t2m[m]),
+      monthly_rainfall: MONTHS.map((m) => precip[m]),
+      confidence: "high",
+      source_explanation: "NASA POWER climatology (community=AG, 2018-2024 average)."
     };
 
     return res.json(out);
@@ -319,6 +223,14 @@ Important:
 });
 
 const PORT = process.env.PORT || 80;
-app.listen(PORT, () => {
-  console.log(`Culture-date-api listening on port ${PORT}`);
-});
+
+// Only auto-start the server when this file is run directly (`node app.mjs`),
+// so it can be imported in tests without binding to a real port.
+const isMainModule = process.argv[1] && import.meta.url === `file://${process.argv[1]}`;
+if (isMainModule) {
+  app.listen(PORT, () => {
+    console.log(`Culture-date-api listening on port ${PORT}`);
+  });
+}
+
+export default app;
